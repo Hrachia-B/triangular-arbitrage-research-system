@@ -1,0 +1,47 @@
+# Python environments and generated package metadata.
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+
+# Local credentials. The example file is deliberately safe to commit.
+.env
+.env.*
+!.env.example
+
+# Python, test, lint, and operating-system caches.
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.DS_Store
+Thumbs.db
+*.log
+
+# Account-derived fee data is local-only. It must be regenerated on each
+# machine and must never be committed, even though it contains no API secret.
+data/account/
+data/**/account/
+configs/generated/
+
+# Generated observations can be very large. Match both the normal top-level
+# layout and exchange-specific layouts such as data/mexc/raw/.
+data/raw/
+data/signals/
+data/snapshots/
+data/logs/
+data/**/raw/
+data/**/signals/
+data/**/snapshots/
+data/**/logs/
+
+# Reports remain on disk but are generated artifacts, including checkpoints
+# and report exports. Lightweight documentation and sample configs remain safe
+# to commit.
+data/reports/
+data/**/reports/
