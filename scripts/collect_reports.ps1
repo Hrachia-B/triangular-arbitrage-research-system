@@ -1,15 +1,20 @@
 [CmdletBinding()]
-param()
+param(
+    [string]$DataDir = $env:TRI_ARB_DATA_DIR
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-$ReportsDirectory = Join-Path $RepoRoot "data\reports"
-$ExportDirectory = Join-Path $ReportsDirectory "export"
+if ([string]::IsNullOrWhiteSpace($DataDir)) {
+    $DataDir = Join-Path $RepoRoot "data"
+}
+$ReportsDirectory = Join-Path $DataDir "reports"
+$ExportDirectory = Join-Path $DataDir "exports"
 
 if (-not (Test-Path -LiteralPath $ReportsDirectory -PathType Container)) {
-    throw "No data\reports directory exists. Run a simulation first."
+    throw "No reports directory exists under $DataDir. Run a simulation first."
 }
 
 New-Item -ItemType Directory -Path $ExportDirectory -Force | Out-Null

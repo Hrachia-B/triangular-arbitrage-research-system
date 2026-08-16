@@ -465,6 +465,36 @@ def test_requested_cli_flags_override_configuration(tmp_path):
     assert args.discover_only is True
 
 
+def test_data_dir_and_compact_storage_cli_overrides(tmp_path):
+    data_dir = tmp_path / "external-data"
+    args = main_module.build_parser().parse_args(
+        [
+            "--data-dir",
+            str(data_dir),
+            "--storage-mode",
+            "compact",
+            "--min-free-gib",
+            "5",
+            "--raw-sample-rate",
+            "0.01",
+            "--top-n",
+            "25",
+            "--near-break-even-threshold",
+            "-0.0002",
+            "--discover-only",
+        ]
+    )
+
+    config = load_config(args.config, main_module._config_overrides(args))
+
+    assert config.output.output_dir == data_dir
+    assert config.output.storage_mode == "compact"
+    assert config.output.min_free_gib == 5
+    assert config.output.raw_sample_rate == 0.01
+    assert config.output.top_n == 25
+    assert config.output.near_break_even_threshold == Decimal("-0.0002")
+
+
 class FailingPublicClient(FakePublicClient):
     async def exchange_info(self):
         raise RuntimeError("synthetic discovery failure")

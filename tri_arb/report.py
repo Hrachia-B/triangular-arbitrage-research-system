@@ -1269,6 +1269,20 @@ def calculate_metrics(
         "run_error": run_error,
         "assumptions": meta.get("assumptions", meta),
     }
+    for key in (
+        "data_dir",
+        "data_drive",
+        "storage_mode",
+        "min_free_gib",
+        "free_gib_at_start",
+        "raw_signal_sample_rate",
+        "top_n_retention",
+        "near_break_even_threshold",
+        "checkpoint_interval_minutes",
+        "compact_mode_active",
+        "latest_report_path",
+    ):
+        metrics[key] = meta.get(key)
     conclusion, rationale = _decision(metrics, min_sample_size)
     metrics["conclusion"] = conclusion
     metrics["conclusion_rationale"] = rationale
@@ -2148,6 +2162,20 @@ def _apply_streaming_metrics(
             "sequence_gaps": int(state["gaps"]),
         }
     )
+    for key in (
+        "data_dir",
+        "data_drive",
+        "storage_mode",
+        "min_free_gib",
+        "free_gib_at_start",
+        "raw_signal_sample_rate",
+        "top_n_retention",
+        "near_break_even_threshold",
+        "checkpoint_interval_minutes",
+        "compact_mode_active",
+        "latest_report_path",
+    ):
+        metrics[key] = metadata.get(key)
     thresholds = metadata.get("decision") if isinstance(metadata.get("decision"), Mapping) else {}
     conclusion, rationale = _decision(metrics, min_sample_size)
     metrics["conclusion"] = conclusion
@@ -2432,6 +2460,20 @@ def render_markdown(metrics: Mapping[str, Any], metadata: Mapping[str, Any] | No
             "## Noisy cycles",
             "",
             *_cycle_table(metrics["noisy_cycles"]),
+            "",
+            "## Storage",
+            "",
+            f"- data_dir: {_escape(metrics.get('data_dir') or 'n/a')}",
+            f"- data_drive: {_escape(metrics.get('data_drive') or 'n/a')}",
+            f"- storage_mode: {_escape(metrics.get('storage_mode') or 'n/a')}",
+            f"- min_free_gib: {_escape(metrics.get('min_free_gib'))}",
+            f"- free_gib_at_start: {_escape(metrics.get('free_gib_at_start'))}",
+            f"- raw_signal_sample_rate: {_escape(metrics.get('raw_signal_sample_rate'))}",
+            f"- top_n_retention: {_escape(metrics.get('top_n_retention'))}",
+            f"- near_break_even_threshold: {_escape(metrics.get('near_break_even_threshold'))}",
+            f"- checkpoint_interval_minutes: {_escape(metrics.get('checkpoint_interval_minutes'))}",
+            f"- compact_mode_active: {_escape(metrics.get('compact_mode_active'))}",
+            f"- latest_report_path: {_escape(metrics.get('latest_report_path') or 'n/a')}",
             "",
             "## Assumptions",
             "",

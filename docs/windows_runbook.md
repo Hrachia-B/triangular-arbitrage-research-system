@@ -1,200 +1,166 @@
 # Windows runbook
 
-This runbook transfers and runs the research-only MEXC Spot observer on a
-Windows laptop. It does not place orders and it cannot prove live
-profitability.
+This runbook installs and runs the research-only MEXC Spot observer on Windows.
+It reads market data, estimates execution constraints, and writes local research
+artifacts. It does not place orders or establish live profitability.
 
-## Before cloning
+## Prerequisites
 
-1. Install 64-bit Python 3.12 from Python.org. Python 3.11 is also supported.
-   Enable the Python launcher during installation.
-2. Install Git for Windows. Keep Git Credential Manager enabled so credentials
-   do not need to be embedded in a clone URL.
-3. In MEXC, create a dedicated API key for the fee check. Disable trading,
-   transfers, and withdrawals, and use an IP allowlist if MEXC offers one for
-   the key. This project only uses the signed read-only
-   `GET /api/v3/tradeFee` request.
-4. Confirm that the GitHub repository is private before cloning it.
+1. Install 64-bit Python 3.12 (Python 3.11 is also supported).
+2. Install Git for Windows.
+3. For the optional fee lookup, create a dedicated MEXC API key with trading,
+   transfer, and withdrawal permissions disabled. Use an IP allowlist when
+   available. The project only makes a signed, read-only trade-fee request.
 
-Never put a GitHub token, MEXC key, or MEXC secret in a command, clone URL,
-commit, screenshot, report, or support message.
+Never put an exchange key, exchange secret, or GitHub token in a command, clone
+URL, commit, screenshot, report, or support message.
 
 ## Clone and set up
 
-Open PowerShell and run:
-
 ```powershell
-git clone https://github.com/Hrachia-B/triangular_arbitrage_system.git
-Set-Location .\triangular_arbitrage_system
+git clone https://github.com/<owner>/triangular-arbitrage-research-system.git
+Set-Location .\triangular-arbitrage-research-system
 .\scripts\setup_windows.ps1
 ```
 
-The setup script:
+The setup script creates `.venv`, installs the dependencies, runs the offline
+test suite, and creates `.env` through hidden prompts if it is absent. A virtual
+environment copied from macOS or Linux must not be reused on Windows.
 
-- selects Python 3.12 or 3.11;
-- creates and activates `.venv`;
-- upgrades pip and installs `requirements.txt`;
-- creates the local data directories;
-- runs the offline test suite;
-- securely prompts for the MEXC API key and secret when `.env` is missing;
-- hides prompt input and never prints either value.
-
-If PowerShell reports that script execution is disabled, enable scripts only
-for the current PowerShell process, then retry:
+If script execution is disabled, enable it only for the current process:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 .\scripts\setup_windows.ps1
 ```
 
-Do not set a permanent machine-wide execution-policy bypass.
+## Choose a data directory
 
-The Mac `.venv` must never be copied to Windows. The setup script creates a
-new Windows environment and every run script explicitly uses
-`.venv\Scripts\python.exe`.
+Without configuration, run scripts write generated data under the repository's
+ignored `data` directory. Long experiments are better placed on a separate
+drive. Set the path once in the current PowerShell session:
+
+```powershell
+$env:TRI_ARB_DATA_DIR = "E:\tri-arb-data"
+.\scripts\setup_external_data_dir.ps1 -DataDir $env:TRI_ARB_DATA_DIR
+```
+
+Use any writable absolute path with adequate free space. The same location can
+also be passed directly to each script with `-DataDir`. Keep the drive connected
+throughout a run.
 
 ## Required experiment sequence
 
-1. Fetch and normalize the account's current MEXC fee information:
+Activate the environment if the setup window is no longer open:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+```
+
+1. Fetch and normalize the current MEXC fee schedule:
 
    ```powershell
    .\scripts\check_mexc_fees.ps1
    ```
 
-   The raw response is written under `data\account\`, and the normalized local
-   configuration is written to
-   `configs\generated\mexc_account_fee.yaml`. Both locations are ignored by
-   Git. The tool must be rerun on a new clone and whenever the account's fees
-   may have changed.
+   The raw response is stored under `$env:TRI_ARB_DATA_DIR\account` (or the
+   repository `data\account` fallback). The normalized configuration is stored
+   at `configs\generated\mexc_account_fee.yaml`. Both locations are ignored by
+   Git. Rerun the check after cloning and whenever fees may have changed.
 
-   If MEXC rejects the default one-call request because `symbol` is required,
-   create a public discovery selection and check only that bounded universe:
-
-   ```powershell
-   .\scripts\run_mexc_discovery.ps1
-   $selection = Get-ChildItem .\data\raw\selected_symbols_*.json |
-       Sort-Object LastWriteTimeUtc -Descending |
-       Select-Object -First 1 -ExpandProperty FullName
-   .\scripts\check_mexc_fees.ps1 --discovery-selection $selection
-   ```
-
-   Explicit symbol checks are sequential and paced. Do not replace this with a
-   parallel request fan-out.
-
-2. Optionally verify the current public discovery universe:
+2. Optionally inspect the current public discovery universe:
 
    ```powershell
    .\scripts\run_mexc_discovery.ps1
    ```
 
-3. Run the required 10-minute validation:
+3. Run the required ten-minute validation:
 
    ```powershell
    .\scripts\run_mexc_10min.ps1
    ```
 
-4. Inspect `data\reports\latest.md`. If the fee check and 10-minute run
-   completed normally, start the 48-hour experiment:
+4. Inspect `reports\latest.md` below the selected data directory. If the fee
+   check and validation completed normally, start the 48-hour experiment:
 
    ```powershell
    .\scripts\run_mexc_48h.ps1
    ```
 
-5. Only if the completed 48-hour report explicitly says
-   `48H_DECISION: CONTINUE_TO_7D`, start the 7-day experiment:
+5. Start the seven-day experiment only if the completed 48-hour report says
+   `48H_DECISION: CONTINUE_TO_7D`:
 
    ```powershell
    .\scripts\run_mexc_7d.ps1
    ```
 
-The 7-day script also reads `data\reports\latest.md` and refuses to start
-unless that decision is present.
+The seven-day script checks the latest report and refuses to run without that
+exact decision. A continuation decision only authorizes more observation, not
+live trading.
 
-## Power, storage, and long-run operation
+## Long-run operation and storage
 
-Keep the laptop plugged in, maintain a stable network connection, and do not
-close the PowerShell window. In Windows Settings, open **System > Power &
-battery > Screen and sleep** and set sleep while plugged in to **Never** for
-the experiment. Restore the normal setting afterward.
-
-An administrator can alternatively disable only the plugged-in sleep and
-hibernate timers:
+Keep the computer plugged in, the network stable, and sleep disabled for the
+duration of the experiment. Restore the normal power settings afterward. If
+needed, an administrator can disable only plugged-in sleep and hibernation:
 
 ```powershell
 powercfg /change standby-timeout-ac 0
 powercfg /change hibernate-timeout-ac 0
 ```
 
-The observer writes high-volume JSONL diagnostics. Measurements from the Mac
-produced about 1.6 GiB in a roughly 54-minute, 20-cycle run; actual Windows
-volume can be higher or lower. The scripts therefore refuse to start with less
-than:
+The full storage mode writes high-volume JSONL diagnostics. The supplied long-
+run scripts use compact mode, retaining exact aggregate counters, bounded top
+opportunities, profitable and near-break-even signals, and deterministic raw
+samples. They require at least:
 
-- 100 GiB free for the 48-hour run;
-- 500 GiB free for the 7-day run.
+- 15 GiB free for the 48-hour compact run;
+- 50 GiB free for the seven-day compact run.
 
-Those are minimum gates, not guarantees. Check free disk space throughout a
-long experiment. Do not start if the laptop cannot retain the generated data.
+These are safety gates, not predictions of actual consumption. Monitor free
+space during long runs. Hourly checkpoints are a better progress indicator than
+console activity.
 
-The Python process may be quiet between status messages. A quiet console does
-not mean it exited. Hourly checkpoints are the reliable progress indicator.
+## Reports and logs
 
-## Reports, checkpoints, and logs
-
-Current artifacts are located at:
+Artifacts are written under the selected data directory:
 
 ```text
-data\reports\latest.md
-data\reports\latest_summary.csv
-data\reports\checkpoint_<timestamp>.md
+reports\latest.md
+reports\latest_summary.csv
+reports\checkpoint_<timestamp>.md
+logs\mexc_48h_console.txt
+logs\mexc_7d_console.txt
 ```
 
-Long-run console copies are located at:
-
-```text
-data\logs\mexc_48h_console.txt
-data\logs\mexc_7d_console.txt
-```
-
-Copy only the latest report artifacts into a local export directory with:
+Collect the newest report artifacts in the ignored `exports` directory with:
 
 ```powershell
 .\scripts\collect_reports.ps1
 ```
 
-The export is written to `data\reports\export\`. Generated reports, account
-fee responses, raw observations, and logs remain ignored by Git.
-
-Before any commit or push, verify that local credentials and data remain
-ignored:
+Before every commit or push, verify that credentials and generated observations
+remain ignored:
 
 ```powershell
 git check-ignore .env
 git status --short
 ```
 
-`.env` must appear as ignored and must never appear in `git status --short`.
+`.env` must be ignored and must never appear in `git status --short`.
 
 ## Stopping safely
 
-Press **Ctrl+C once** in the active PowerShell window. Allow Python time to stop
-the public WebSocket tasks and finish the report. Do not close the window,
-terminate Python in Task Manager, power off the laptop, or press Ctrl+C
-repeatedly while finalization is running.
+Press **Ctrl+C once** in the active PowerShell window, then allow Python to stop
+the WebSocket tasks and finish the report. Repeated interrupts, closing the
+window, or terminating Python can leave the final report incomplete. After a
+forced interruption, use the most recent checkpoint and treat the run as
+incomplete.
 
-If the process is forcibly interrupted, use the most recent hourly checkpoint;
-the final timestamped report may be incomplete. The run scripts propagate the
-Python exit code, so a nonzero exit code must be investigated before trusting
-the output.
+## Interpretation
 
-## Security and interpretation warnings
-
-- The simulator uses public market data and account-derived fee assumptions. It
-  performs no live trading.
-- The fee checker is isolated to the read-only MEXC trade-fee endpoint. Never
-  enable trading or withdrawal permissions for its key.
-- A public-data simulation cannot establish fill probability or prove live
-  profitability.
+- The simulator uses public market data and optional locally supplied fee
+  assumptions. It performs no live trading.
+- Public order-book data cannot establish queue position or fill probability.
+- Historical or simulated output does not guarantee future results.
 - `CONTINUE_TO_7D` means collect more evidence. It is not permission to trade.
-- Keep the repository private even though secrets and generated account data
-  are excluded.

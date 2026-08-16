@@ -155,3 +155,53 @@ async def test_recorder_observer_runs_only_after_a_successful_append(tmp_path):
 
     assert path.read_text(encoding="utf-8")
     assert observed == [("signal", {"signal_id": "durable"})]
+
+
+@pytest.mark.asyncio
+async def test_compact_recorder_keeps_survivors_near_break_even_and_top_opportunities(tmp_path):
+    observed: list[tuple[str, object]] = []
+    recorder = JSONLRecorder(
+        tmp_path,
+        run_id="compact",
+        storage_mode="compact",
+        raw_sample_rate=0,
+        top_n=2,
+        near_break_even_threshold="-0.0005",
+        record_observer=lambda category, value: observed.append((category, value)),
+    )
+
+    await recorder.record(
+        "signal",
+        {"signal_id": "discarded", "raw_return": "0.001", "return_after_fees": "-0.001"},
+    )
+    await recorder.record(
+        "signal",
+        {"signal_id": "near", "raw_return": "0.002", "return_after_fees": "-0.0004"},
+    )
+    await recorder.record(
+        "signal",
+        {
+            "signal_id": "survivor",
+            "raw_return": "0.003",
+            "return_after_fees": "0.0001",
+            "return_after_depth": "0.00005",
+            "pessimistic_return": "0.00001",
+            "profitable_after_fees": True,
+            "profitable_after_depth": True,
+            "profitable_pessimistic": True,
+        },
+    )
+    recorder.close()
+
+    text = recorder.path_for("signal").read_text(encoding="utf-8")
+    assert '"signal_id":"near"' in text
+    assert '"signal_id":"survivor"' in text
+    assert '"signal_id":"discarded"' not in text
+    assert len(observed) == 3
+
+    retained = tmp_path / "signals" / "compact_top_opportunities_compact.json"
+    payload = retained.read_text(encoding="utf-8")
+    assert '"top_raw_opportunities"' in payload
+    assert '"top_net_opportunities"' in payload
+    assert '"top_realistic_opportunities"' in payload
+    assert '"signal_id": "survivor"' in payload

@@ -6,6 +6,8 @@ import argparse
 import asyncio
 import json
 import logging
+import os
+import shutil
 import signal
 import sys
 import time
@@ -102,7 +104,33 @@ def build_parser() -> argparse.ArgumentParser:
         type=_csv_values,
         help="comma-separated latency rechecks in milliseconds",
     )
-    parser.add_argument("--output-dir", type=Path, help="artifact directory")
+    parser.add_argument(
+        "--data-dir",
+        "--output-dir",
+        dest="output_dir",
+        type=Path,
+        help="root directory for raw data, signals, logs, and reports",
+    )
+    parser.add_argument(
+        "--storage-mode",
+        choices=("full", "compact"),
+        help="full detail or bounded compact persistence",
+    )
+    parser.add_argument(
+        "--min-free-gib",
+        type=float,
+        help="minimum free space required on the data-directory drive",
+    )
+    parser.add_argument(
+        "--raw-sample-rate",
+        type=float,
+        help="compact-mode fraction of raw opportunities retained (default: 0.001)",
+    )
+    parser.add_argument("--top-n", type=int, help="compact-mode top records per ranking")
+    parser.add_argument(
+        "--near-break-even-threshold",
+        help="compact-mode net edge above which signals are always retained",
+    )
     parser.add_argument(
         "--log-level",
         choices=("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"),
@@ -135,7 +163,52 @@ def _config_overrides(args: argparse.Namespace) -> dict[str, Any]:
         "start_sizes": args.start_sizes,
         "latency_buckets_ms": args.latency_buckets,
         "output_dir": args.output_dir,
+        "storage_mode": args.storage_mode,
+        "min_free_gib": args.min_free_gib,
+        "raw_sample_rate": args.raw_sample_rate,
+        "top_n": args.top_n,
+        "near_break_even_threshold": args.near_break_even_threshold,
         "log_level": args.log_level,
+    }
+
+
+def _prepare_storage(config: AppConfig, *, enforce: bool = True) -> dict[str, Any]:
+    data_dir = config.output.output_dir
+    for name in ("raw", "signals", "snapshots", "logs", "reports", "account", "exports"):
+        (data_dir / name).mkdir(parents=True, exist_ok=True)
+
+    probe = data_dir / f".tri_arb_write_test_{os.getpid()}"
+    try:
+        probe.write_text("write-test", encoding="ascii")
+    except OSError as exc:
+        raise ConfigError(f"data directory is not writable: {data_dir}: {exc}") from exc
+    finally:
+        with suppress(OSError):
+            probe.unlink(missing_ok=True)
+
+    usage = shutil.disk_usage(data_dir)
+    free_gib = usage.free / (1024**3)
+    required_gib = float(config.output.min_free_gib or 0)
+    resolved = data_dir.resolve()
+    drive_root = Path(resolved.anchor) if resolved.anchor else resolved
+    drive_label = str(drive_root).rstrip("\\/") or str(drive_root)
+    if enforce and free_gib < required_gib:
+        raise ConfigError(
+            f"data directory {data_dir} uses drive {drive_label}, which has "
+            f"{free_gib:.1f} GiB free; {required_gib:g} GiB is required"
+        )
+    return {
+        "data_dir": str(data_dir),
+        "data_drive": drive_label,
+        "storage_mode": config.output.storage_mode,
+        "min_free_gib": required_gib,
+        "free_gib_at_start": round(free_gib, 2),
+        "raw_signal_sample_rate": config.output.raw_sample_rate,
+        "top_n_retention": config.output.top_n,
+        "near_break_even_threshold": str(config.output.near_break_even_threshold),
+        "checkpoint_interval_minutes": config.run.checkpoint_every_minutes,
+        "compact_mode_active": config.output.storage_mode == "compact",
+        "latest_report_path": str(data_dir / "reports" / "latest.md"),
     }
 
 
@@ -226,6 +299,7 @@ def _assumptions(
     config: AppConfig,
     fee_schedule: FeeSchedule,
     monitored_symbols: Iterable[str] | None = None,
+    storage_info: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     exchange_name = "MEXC Spot" if config.exchange == "mexc" else "Binance Spot"
     reported_symbol_fees = dict(fee_schedule.symbol_taker_fees)
@@ -237,7 +311,7 @@ def _assumptions(
             symbol: fee for symbol, fee in reported_symbol_fees.items() if symbol in selected
         }
     observed_fees = tuple(fee_schedule.symbol_taker_fees.values())
-    return {
+    assumptions = {
         "exchange": exchange_name,
         "market_data_only": True,
         "research_only": True,
@@ -281,6 +355,8 @@ def _assumptions(
         "rest_base_url": config.network.rest_base_url,
         "websocket_base_url": config.network.websocket_base_url,
     }
+    assumptions.update(storage_info or {})
+    return assumptions
 
 
 def _report_metadata(
@@ -296,8 +372,9 @@ def _report_metadata(
     manager_metrics: Mapping[str, Any],
     startup_book_health: Mapping[str, Any],
     error: str | None,
+    storage_info: Mapping[str, Any],
 ) -> dict[str, Any]:
-    return {
+    metadata = {
         "exchange": "MEXC Spot" if config.exchange == "mexc" else "Binance Spot",
         "run_id": run_id,
         "started_at": started_at,
@@ -316,12 +393,15 @@ def _report_metadata(
             config,
             fee_schedule,
             discovery.symbol_names if discovery else None,
+            storage_info,
         ),
         "scanner_stats": scanner_stats.to_dict(),
         "order_book_metrics": jsonable(manager_metrics),
         "startup_book_health": jsonable(startup_book_health),
         "error": error,
     }
+    metadata.update(storage_info)
+    return metadata
 
 
 def _load_artifacts(paths: Iterable[Path]) -> list[dict[str, Any]]:
@@ -797,6 +877,7 @@ async def _publish_periodic_checkpoints(
     simulation_started: float,
     stop_event: asyncio.Event,
     report_accumulator: StreamingReportAccumulator,
+    storage_info: Mapping[str, Any],
 ) -> None:
     """Publish bounded-memory cumulative checkpoints without rereading JSONL."""
 
@@ -825,6 +906,7 @@ async def _publish_periodic_checkpoints(
                 manager_metrics=manager.metrics_snapshot(),
                 startup_book_health=startup_book_health,
                 error=None,
+                storage_info=storage_info,
             )
             metadata.update(report_accumulator.aggregation_metadata())
             snapshot = report_accumulator.snapshot()
@@ -873,10 +955,12 @@ async def run_observer(
     discover_only: bool = False,
     stop_event: asyncio.Event | None = None,
     fee_schedule: FeeSchedule | None = None,
+    storage_info: Mapping[str, Any] | None = None,
 ) -> RunOutcome:
     """Run discovery and, unless requested otherwise, the live paper observer."""
 
     effective_fees = fee_schedule or _config_fee_schedule(config)
+    effective_storage = dict(storage_info or _prepare_storage(config, enforce=False))
     stop = stop_event or asyncio.Event()
     _install_signal_handlers(stop)
     report_accumulator = StreamingReportAccumulator(
@@ -887,6 +971,10 @@ async def run_observer(
         config.output.output_dir,
         max_bytes=config.output.max_jsonl_bytes,
         record_observer=report_accumulator.observe,
+        storage_mode=config.output.storage_mode,
+        raw_sample_rate=config.output.raw_sample_rate,
+        top_n=config.output.top_n,
+        near_break_even_threshold=config.output.near_break_even_threshold,
     )
     await recorder.start()
     overall_started_at = iso_utc()
@@ -995,6 +1083,7 @@ async def run_observer(
                         simulation_started,
                         stop,
                         report_accumulator,
+                        effective_storage,
                     ),
                     name="periodic-report-checkpoints",
                 )
@@ -1056,6 +1145,7 @@ async def run_observer(
         manager_metrics=manager_metrics,
         startup_book_health=startup_book_health,
         error=error,
+        storage_info=effective_storage,
     )
     try:
         metadata.update(report_accumulator.aggregation_metadata())
@@ -1087,12 +1177,17 @@ async def _async_main(
     args: argparse.Namespace,
     config: AppConfig,
     fee_schedule: FeeSchedule,
+    storage_info: Mapping[str, Any],
 ) -> int:
     if args.report_only is not None:
         records, metadata = _load_report_bundle(args.report_only)
         metadata.setdefault("latency_buckets_ms", list(config.simulation.latency_buckets_ms))
         metadata.setdefault("fee_source", fee_schedule.source)
-        metadata.setdefault("assumptions", _assumptions(config, fee_schedule))
+        metadata.setdefault(
+            "assumptions", _assumptions(config, fee_schedule, storage_info=storage_info)
+        )
+        for key, value in storage_info.items():
+            metadata.setdefault(key, value)
         artifacts = ReportGenerator(config.output.output_dir / "reports").generate(
             records,
             metadata,
@@ -1104,6 +1199,7 @@ async def _async_main(
         config,
         discover_only=args.discover_only,
         fee_schedule=fee_schedule,
+        storage_info=storage_info,
     )
     if outcome.discovery is not None:
         print(
@@ -1128,12 +1224,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         fee_schedule = _resolve_fee_schedule(args, config)
     except AccountFeeError as exc:
         parser.error(str(exc))
+    try:
+        storage_info = _prepare_storage(config, enforce=args.report_only is None)
+    except (ConfigError, OSError) as exc:
+        parser.error(str(exc))
     _configure_logging(config)
     LOGGER.warning(
         "simulation-only mode: market observation uses public data and no order endpoints exist"
     )
     try:
-        return asyncio.run(_async_main(args, config, fee_schedule))
+        return asyncio.run(_async_main(args, config, fee_schedule, storage_info))
     except KeyboardInterrupt:  # Fallback for platforms without loop signal handlers.
         LOGGER.warning("interrupted before graceful shutdown completed")
         return 130

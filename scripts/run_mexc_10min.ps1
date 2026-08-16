@@ -1,10 +1,16 @@
 [CmdletBinding()]
-param()
+param(
+    [string]$DataDir = $env:TRI_ARB_DATA_DIR,
+    [int]$MinFreeGiB = 5
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+if ([string]::IsNullOrWhiteSpace($DataDir)) {
+    $DataDir = Join-Path $RepoRoot "data"
+}
 $Python = Join-Path $RepoRoot ".venv\Scripts\python.exe"
 $FeeConfig = Join-Path $RepoRoot "configs\generated\mexc_account_fee.yaml"
 
@@ -21,7 +27,9 @@ $exitCode = 1
 
 Push-Location $RepoRoot
 try {
-    & $Python -u -m tri_arb.main --exchange mexc --duration-minutes 10 --max-cycles 20 --use-account-fees
+    & $Python -u -m tri_arb.main --exchange mexc --duration-minutes 10 `
+        --max-cycles 20 --use-account-fees --data-dir $DataDir `
+        --storage-mode compact --min-free-gib $MinFreeGiB
     $exitCode = $LASTEXITCODE
 }
 finally {

@@ -1,0 +1,2 @@
+exchange,duration_minutes,monitored_symbols,monitored_cycles,fee_assumption_per_leg,raw_opportunities,profitable_after_fees,profitable_after_depth,profitable_pessimistic,ghost_arbitrage_percentage,total_simulated_pnl,decision,source_note
+Binance Spot,60,39,50,0.001,152920,0,0,0,100,,STOP,Reconstructed from metrics retained in project documentation; original generated report unavailable

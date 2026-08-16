@@ -1,10 +1,16 @@
 [CmdletBinding()]
-param()
+param(
+    [string]$DataDir = $env:TRI_ARB_DATA_DIR,
+    [int]$MinFreeGiB = 5
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+if ([string]::IsNullOrWhiteSpace($DataDir)) {
+    $DataDir = Join-Path $RepoRoot "data"
+}
 $Python = Join-Path $RepoRoot ".venv\Scripts\python.exe"
 
 if (-not (Test-Path -LiteralPath $Python -PathType Leaf)) {
@@ -17,7 +23,8 @@ $exitCode = 1
 
 Push-Location $RepoRoot
 try {
-    & $Python -u -m tri_arb.main --exchange mexc --discover-only
+    & $Python -u -m tri_arb.main --exchange mexc --discover-only `
+        --data-dir $DataDir --storage-mode compact --min-free-gib $MinFreeGiB
     $exitCode = $LASTEXITCODE
 }
 finally {

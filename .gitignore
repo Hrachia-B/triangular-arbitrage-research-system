@@ -45,3 +45,8 @@ data/**/logs/
 # to commit.
 data/reports/
 data/**/reports/
+
+# Common external-data directory names must never be added if they are created
+# beneath a working tree by mistake.
+D:/
+tri_arb_data/

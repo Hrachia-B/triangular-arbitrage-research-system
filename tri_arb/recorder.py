@@ -8,6 +8,8 @@ being written; completed lines remain independently parseable.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import heapq
 import json
 import os
 import re
@@ -93,6 +95,10 @@ class JSONLRecorder:
         max_bytes: int = 50 * 1024 * 1024,
         fsync: bool = False,
         record_observer: Callable[[str, Any], None] | None = None,
+        storage_mode: str = "full",
+        raw_sample_rate: float = 0.001,
+        top_n: int = 1_000,
+        near_break_even_threshold: Decimal = Decimal("-0.0005"),
     ) -> None:
         if max_bytes <= 0:
             raise ValueError("max_bytes must be positive")
@@ -103,6 +109,23 @@ class JSONLRecorder:
         self.max_bytes = int(max_bytes)
         self.fsync = fsync
         self._record_observer = record_observer
+        self.storage_mode = storage_mode.strip().lower()
+        if self.storage_mode not in {"full", "compact"}:
+            raise ValueError("storage_mode must be 'full' or 'compact'")
+        self.raw_sample_rate = float(raw_sample_rate)
+        if not 0 <= self.raw_sample_rate <= 1:
+            raise ValueError("raw_sample_rate must be in [0, 1]")
+        self.top_n = int(top_n)
+        if self.top_n < 1:
+            raise ValueError("top_n must be positive")
+        self.near_break_even_threshold = Decimal(str(near_break_even_threshold))
+        self._retained_signal_ids: set[str] = set()
+        self._top_sequence = 0
+        self._top_records: dict[str, list[tuple[Decimal, int, Any]]] = {
+            "raw": [],
+            "net": [],
+            "realistic": [],
+        }
         self.raw_dir = self.output_dir / "raw"
         self.signals_dir = self.output_dir / "signals"
         self.reports_dir = self.output_dir / "reports"
@@ -177,6 +200,110 @@ class JSONLRecorder:
             if self.fsync:
                 os.fsync(handle.fileno())
 
+    @staticmethod
+    def _decimal_field(record: Mapping[str, Any], *names: str) -> Decimal | None:
+        for name in names:
+            value = record.get(name)
+            if value is None or isinstance(value, bool):
+                continue
+            try:
+                return Decimal(str(value))
+            except Exception:
+                continue
+        return None
+
+    def _sampled(self, category: str, record: Mapping[str, Any]) -> bool:
+        if self.raw_sample_rate <= 0:
+            return False
+        if self.raw_sample_rate >= 1:
+            return True
+        identity = record.get("signal_id") or record.get("opportunity_id")
+        if not identity:
+            identity = json.dumps(record, default=_json_default, sort_keys=True)
+        digest = hashlib.blake2b(
+            f"{self.run_id}:{category}:{identity}".encode(), digest_size=8
+        ).digest()
+        ratio = int.from_bytes(digest, "big") / ((1 << 64) - 1)
+        return ratio < self.raw_sample_rate
+
+    def _consider_top(self, name: str, score: Decimal | None, record: Any) -> None:
+        if score is None:
+            return
+        self._top_sequence += 1
+        item = (score, self._top_sequence, record)
+        heap = self._top_records[name]
+        if len(heap) < self.top_n:
+            heapq.heappush(heap, item)
+        elif score > heap[0][0]:
+            heapq.heapreplace(heap, item)
+
+    def _compact_should_persist(self, category: str, record: Mapping[str, Any]) -> bool:
+        signal_id = str(record.get("signal_id") or record.get("opportunity_id") or "")
+        if category == "raw_opportunity":
+            self._consider_top("raw", self._decimal_field(record, "raw_return"), dict(record))
+            return self._sampled(category, record)
+        if category in {"signal", "opportunity"}:
+            net = self._decimal_field(record, "return_after_fees", "net_return")
+            realistic = self._decimal_field(
+                record, "pessimistic_return", "return_after_depth", "realistic_return"
+            )
+            self._consider_top("net", net, dict(record))
+            self._consider_top("realistic", realistic, dict(record))
+            profitable = any(
+                bool(record.get(field))
+                for field in (
+                    "profitable_after_fees",
+                    "profitable_after_depth",
+                    "profitable_pessimistic",
+                )
+            )
+            keep = (
+                profitable
+                or (net is not None and net > self.near_break_even_threshold)
+                or self._sampled(category, record)
+            )
+            if keep and signal_id:
+                self._retained_signal_ids.add(signal_id)
+            return keep
+        if category in {"after_fees", "depth"}:
+            if signal_id:
+                self._retained_signal_ids.add(signal_id)
+            return True
+        if category == "pessimistic":
+            keep = bool(record.get("profitable_pessimistic"))
+            if keep and signal_id:
+                self._retained_signal_ids.add(signal_id)
+            return keep
+        if category == "latency":
+            return bool(signal_id and signal_id in self._retained_signal_ids)
+        return True
+
+    def _write_compact_top_records(self) -> None:
+        if self.storage_mode != "compact":
+            return
+        payload = {
+            "recorded_at": _utc_now().isoformat(),
+            "run_id": self.run_id,
+            "storage_mode": self.storage_mode,
+            "top_n": self.top_n,
+            "top_raw_opportunities": [
+                record for _, _, record in sorted(self._top_records["raw"], reverse=True)
+            ],
+            "top_net_opportunities": [
+                record for _, _, record in sorted(self._top_records["net"], reverse=True)
+            ],
+            "top_realistic_opportunities": [
+                record for _, _, record in sorted(self._top_records["realistic"], reverse=True)
+            ],
+        }
+        path = self.signals_dir / f"compact_top_opportunities_{self.run_id}.json"
+        temporary = path.with_suffix(path.suffix + ".tmp")
+        temporary.write_text(
+            json.dumps(payload, default=_json_default, ensure_ascii=False, allow_nan=False),
+            encoding="utf-8",
+        )
+        temporary.replace(path)
+
     async def record(self, category: str, record: Any, **context: Any) -> Path:
         """Append one self-describing line and return its artifact path."""
 
@@ -184,23 +311,28 @@ class JSONLRecorder:
             raise RuntimeError("recorder is closed")
         safe = self._safe_category(category)
         path = self.path_for(safe)
+        value = _record_value(record)
         envelope = {
             "recorded_at": _utc_now().isoformat(),
             "run_id": self.run_id,
             "category": safe,
-            "data": _record_value(record),
+            "data": value,
         }
         if context:
             envelope["context"] = context
+        persist = True
+        if self.storage_mode == "compact" and isinstance(value, Mapping):
+            persist = self._compact_should_persist(safe, value)
         async with self._lock:
             # JSON serialization, open/write/flush, rotation, and optional fsync
             # can all block.  Offloading preserves WebSocket consumption and
             # latency timers while the scanner applies natural backpressure.
-            await asyncio.to_thread(self._write_envelope, path, envelope)
+            if persist:
+                await asyncio.to_thread(self._write_envelope, path, envelope)
             if self._record_observer is not None:
-                # The observer is intentionally synchronous and lightweight.
-                # It runs only after the JSONL append succeeds, so cumulative
-                # in-memory report state never gets ahead of durable records.
+                # In full mode this runs only after a successful durable append.
+                # Compact mode also observes deliberately discarded samples so
+                # cumulative reports remain exact without retaining every payload.
                 self._record_observer(safe, envelope["data"])
         return path
 
@@ -257,6 +389,8 @@ class JSONLRecorder:
     def close(self) -> None:
         """Prevent future writes (there are no buffered file handles to drain)."""
 
+        if not self._closed:
+            self._write_compact_top_records()
         self._closed = True
 
     async def aclose(self) -> None:

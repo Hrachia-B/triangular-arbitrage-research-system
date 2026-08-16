@@ -340,6 +340,11 @@ class OutputConfig:
     log_level: str = "INFO"
     max_jsonl_bytes: int = 50 * 1024 * 1024
     log_backup_count: int = 3
+    storage_mode: str = "full"
+    min_free_gib: float | None = None
+    raw_sample_rate: float = 0.001
+    top_n: int = 1_000
+    near_break_even_threshold: Decimal = Decimal("-0.0005")
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "output_dir", Path(self.output_dir))
@@ -349,6 +354,27 @@ class OutputConfig:
         object.__setattr__(self, "log_level", normalized_level)
         if self.max_jsonl_bytes < 1 or self.log_backup_count < 0:
             raise ConfigError("output rotation settings cannot be negative")
+        storage_mode = self.storage_mode.strip().lower()
+        if storage_mode not in {"full", "compact"}:
+            raise ConfigError("output.storage_mode must be 'full' or 'compact'")
+        object.__setattr__(self, "storage_mode", storage_mode)
+        minimum = 15.0 if storage_mode == "compact" else 100.0
+        if self.min_free_gib is not None:
+            minimum = float(self.min_free_gib)
+        if minimum < 0:
+            raise ConfigError("output.min_free_gib cannot be negative")
+        object.__setattr__(self, "min_free_gib", minimum)
+        sample_rate = float(self.raw_sample_rate)
+        if not 0 <= sample_rate <= 1:
+            raise ConfigError("output.raw_sample_rate must be in [0, 1]")
+        object.__setattr__(self, "raw_sample_rate", sample_rate)
+        if self.top_n < 1:
+            raise ConfigError("output.top_n must be positive")
+        object.__setattr__(
+            self,
+            "near_break_even_threshold",
+            Decimal(str(self.near_break_even_threshold)),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -453,6 +479,11 @@ _FLAT_KEYS = {
     "extra_slippage_bps": ("simulation", "extra_slippage_bps"),
     "output_dir": ("output", "output_dir"),
     "log_level": ("output", "log_level"),
+    "storage_mode": ("output", "storage_mode"),
+    "min_free_gib": ("output", "min_free_gib"),
+    "raw_sample_rate": ("output", "raw_sample_rate"),
+    "top_n": ("output", "top_n"),
+    "near_break_even_threshold": ("output", "near_break_even_threshold"),
 }
 
 _FIELD_ALIASES = {
@@ -749,7 +780,19 @@ def config_from_mapping(values: Mapping[str, Any] | None = None) -> AppConfig:
 
     output_raw = dict(raw.get("output", {}))
     _unknown_fields(
-        "output", output_raw, {"output_dir", "log_level", "max_jsonl_bytes", "log_backup_count"}
+        "output",
+        output_raw,
+        {
+            "output_dir",
+            "log_level",
+            "max_jsonl_bytes",
+            "log_backup_count",
+            "storage_mode",
+            "min_free_gib",
+            "raw_sample_rate",
+            "top_n",
+            "near_break_even_threshold",
+        },
     )
     output = OutputConfig(
         output_dir=Path(output_raw.get("output_dir", "data")),
@@ -760,6 +803,20 @@ def config_from_mapping(values: Mapping[str, Any] | None = None) -> AppConfig:
         ),
         log_backup_count=_integer(
             output_raw.get("log_backup_count", 3), name="output.log_backup_count"
+        ),
+        storage_mode=str(output_raw.get("storage_mode", "full")),
+        min_free_gib=(
+            None
+            if output_raw.get("min_free_gib") is None
+            else _number(output_raw["min_free_gib"], name="output.min_free_gib")
+        ),
+        raw_sample_rate=_number(
+            output_raw.get("raw_sample_rate", 0.001), name="output.raw_sample_rate"
+        ),
+        top_n=_integer(output_raw.get("top_n", 1_000), name="output.top_n"),
+        near_break_even_threshold=_decimal(
+            output_raw.get("near_break_even_threshold", "-0.0005"),
+            name="output.near_break_even_threshold",
         ),
     )
     decision_raw = dict(raw.get("decision", {}))
