@@ -18,7 +18,7 @@ URL, commit, screenshot, report, or support message.
 ## Clone and set up
 
 ```powershell
-git clone https://github.com/<owner>/triangular-arbitrage-research-system.git
+git clone https://github.com/Hrachia-B/triangular-arbitrage-research-system.git
 Set-Location .\triangular-arbitrage-research-system
 .\scripts\setup_windows.ps1
 ```

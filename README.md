@@ -97,7 +97,7 @@ Python 3.12 is recommended; Python 3.11 is supported.
 Windows:
 
 ```powershell
-git clone https://github.com/<owner>/triangular-arbitrage-research-system.git
+git clone https://github.com/Hrachia-B/triangular-arbitrage-research-system.git
 cd triangular-arbitrage-research-system
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
@@ -109,7 +109,7 @@ python -m pytest
 macOS/Linux:
 
 ```bash
-git clone https://github.com/<owner>/triangular-arbitrage-research-system.git
+git clone https://github.com/Hrachia-B/triangular-arbitrage-research-system.git
 cd triangular-arbitrage-research-system
 python3 -m venv .venv
 source .venv/bin/activate
